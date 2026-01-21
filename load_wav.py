@@ -12,7 +12,7 @@ print("불러올 파일:", wav_path)
 
 # 음성 로드
 y, sr = librosa.load(wav_path, sr=None)
-
+# y는 음성신호(float), sr은 샘플레이드(1초당 샘플 수 ), sr = None은 원본 샘플레이트 유지.
 print("샘플레이트:", sr)
 print("신호 길이:", len(y))
 print("재생 시간(초):", len(y) / sr)
