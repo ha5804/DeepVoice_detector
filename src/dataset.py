@@ -3,6 +3,7 @@ import os
 import random
 import librosa
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 
 class VoiceDataset(Dataset):
@@ -22,12 +23,11 @@ class VoiceDataset(Dataset):
             raise ValueError("mode must be 'train' or 'test'")
 
     def _load_train_data(self):
-        #cfg는 파이썬 딕셔너리. config.yaml의 내용을 딕셔너리로 생성
         root = self.cfg["data"]["train_clean_path"]
-        for r, dirs, files in os.walk(root):
+        for r, _, files in os.walk(root):
             for f in files:
                 if f.endswith(".flac"):
-                    self.samples.append(r + "/" + f)
+                    self.samples.append(os.path.join(r, f))
 
     def _load_test_data(self):
         clean_root = self.cfg["data"]["test_clean_path"]
@@ -36,32 +36,66 @@ class VoiceDataset(Dataset):
         for r, _, files in os.walk(clean_root):
             for f in files:
                 if f.endswith(".flac"):
-                    self.samples.append((r + "/" + f, 0))
+                    self.samples.append((os.path.join(r, f), 0))
 
         for r, _, files in os.walk(anomaly_root):
             for f in files:
                 if f.endswith(".wav"):
-                    self.samples.append((r + "/" + f, 1))
+                    self.samples.append((os.path.join(r, f), 1))
 
         random.shuffle(self.samples)
 
     def __len__(self):
         return len(self.samples)
 
+    def _crop_or_pad(self, mel):
+        """
+        mel: (n_mels, T)
+        return: (n_mels, fixed_T)
+        """
+        target_T = self.cfg["data"]["segment_frames"]
+        T = mel.shape[1]
+
+        if T > target_T:
+            start = random.randint(0, T - target_T)
+            mel = mel[:, start:start + target_T]
+        else:
+            pad_width = target_T - T
+            mel = np.pad(
+                mel,
+                pad_width=((0, 0), (0, pad_width)),
+                mode="constant"
+            )
+        return mel
+
     def __getitem__(self, idx):
+        # idx번째 샘플 반환
         if self.mode == "train":
             path = self.samples[idx]
             label = None
         else:
             path, label = self.samples[idx]
 
+        # 음성 로드
         wav, sr = librosa.load(
             path,
             sr=self.cfg["data"]["sample_rate"]
         )
 
-        # feature extraction (on-the-fly)
+        # mel-spectrogram
         mel = librosa.feature.melspectrogram(
             y=wav,
             sr=sr,
+            n_mels=self.cfg["data"]["n_mels"]
         )
+        mel = librosa.power_to_db(mel)
+
+        # segment
+        mel = self._crop_or_pad(mel)
+
+        feature = torch.tensor(mel, dtype=torch.float32)
+
+        if self.mode == "train":
+            return feature
+        else:
+            return feature, torch.tensor(label)
