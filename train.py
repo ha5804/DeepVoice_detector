@@ -1,81 +1,60 @@
-# train.py
-import torch
+import torch, os
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-from src.dataset import SegmentVoiceDataset
+import time
+import numpy as np
+from src.data_split import get_data
+from src.dataset import VoiceDataset
+from src.preprocess import AudioPreprocessor
+from src.utils import load_config, extract_logmel
 from src.models import LSTMAutoEncoder
-from src.utils import load_config
-import os
 
-def train():
-    # ---------- config ----------
-    cfg = load_config("config/config.yaml")
+cfg = load_config("config/config.yaml")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+train_files, _ = get_data("anomaly", cfg["data"]["root"])
+prep = AudioPreprocessor(cfg["data"]["sample_rate"])
 
-    print("Using device:", device)
+dataset = VoiceDataset(
+    train_files,
+    prep,
+    lambda x: torch.tensor(
+        extract_logmel(x, cfg["data"]["sample_rate"], cfg["data"]["n_mels"]),
+        dtype=torch.float32
+    ),
+    cfg["data"]["segment_frames"] * cfg["data"]["hop_length"],
+    "anomaly_train"
+)
 
+loader = DataLoader(dataset, batch_size=cfg["training"]["batch_size"], shuffle=True)
 
-    # ---------- dataset / dataloader ----------
-    train_dataset = SegmentVoiceDataset(cfg, mode="train")
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=1,
-        shuffle=True,
-        drop_last=True
-    )
+model = LSTMAutoEncoder(
+    cfg["data"]["n_mels"],
+    cfg["model"]["hidden_dim"],
+    cfg["model"]["latent_dim"],
+    cfg["model"]["num_layers"]
+).to(device)
 
-    # ---------- model ----------
-    model = LSTMAutoEncoder(
-        n_mels=cfg["data"]["n_mels"],
-        hidden_dim=cfg["model"]["hidden_dim"],
-        latent_dim=cfg["model"]["latent_dim"],
-        num_layers=cfg["model"]["num_layers"]
-    ).to(device)
+opt = torch.optim.Adam(model.parameters(), lr=cfg["training"]["lr"])
+loss_fn = nn.MSELoss()
+epoch_times = []
 
-    # ---------- loss / optimizer ----------
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=cfg["training"]["lr"]
-    )
+for e in range(cfg["training"]["epochs"]):
+    start = time.time()
 
-    # ---------- training loop ----------
-    model.train()
-    for epoch in range(cfg["training"]["epochs"]):
-        epoch_loss = 0.0
-        pbar = tqdm(
-            train_loader,
-            desc=f"Epoch [{epoch+1}/{cfg['training']['epochs']}]",
-            total=len(train_loader)
-        )
-        for x in train_loader:
-            x = x.to(device)
+    for x in loader:
+        x = x.to(device)
+        loss = loss_fn(model(x), x)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
 
-            x_hat = model(x)
-            loss = criterion(x_hat, x)
+    elapsed = time.time() - start
+    epoch_times.append(elapsed)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    print(f"[Epoch {e+1}] loss={loss.item():.4f}, time={elapsed:.2f}s")
 
-            epoch_loss += loss.item()
-            pbar.set_postfix(loss=loss.item())
+total_train_time = sum(epoch_times)
+print("Total AE train time:", total_train_time)
 
-        epoch_loss /= len(train_loader)
-        print(f"[Epoch {epoch+1}] loss: {epoch_loss:.6f}")
-
-    save_path = cfg["training"]["save_path"]
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.save(model.state_dict(), save_path)
-
-    # ---------- save ----------
-    torch.save(model.state_dict(), cfg["training"]["save_path"])
-    print("Model saved.")
-
-if __name__ == "__main__":
-    train()
+np.save("ae_train_times.npy", np.array(epoch_times))

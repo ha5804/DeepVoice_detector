@@ -7,7 +7,7 @@ class LSTMAutoEncoder(nn.Module):
         self,
         n_mels=80,
         hidden_dim=128,
-        latent_dim=64,
+        latent_dim=32,
         num_layers=2
     ):
         super().__init__()
